@@ -6,6 +6,7 @@
 <title>be10x Pre-Read Generator</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root{--ink:#16150f;--paper:#f5f3ee;--card:#fff;--accent:#c2410c;--line:#e4dfd5;--muted:#7d7869;}
   *{margin:0;padding:0;box-sizing:border-box;}
@@ -92,9 +93,9 @@
         <div class="drop" id="drop">
           <div class="ic">&#128196;</div>
           <strong>Drop a file or click to upload</strong>
-          <span>.docx, .doc or .txt</span>
+          <span>.pptx, .docx, .doc or .txt</span>
           <div class="filename" id="fname"></div>
-          <input type="file" id="file" accept=".txt,.doc,.docx" hidden>
+          <input type="file" id="file" accept=".txt,.doc,.docx,.pptx,.ppt" hidden>
         </div>
         <p class="hint" style="text-align:center">&mdash; or paste below &mdash;</p>
         <textarea id="content" placeholder="Paste the trainer's notes, outline, or even just a topic name..."></textarea>
@@ -135,12 +136,34 @@ drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files[0])handleFile(ev.data
 fileInput.onchange=()=>{if(fileInput.files[0])handleFile(fileInput.files[0]);};
 async function handleFile(file){
   document.getElementById('fname').textContent='\u2713 '+file.name;
-  if(file.name.toLowerCase().endsWith('.docx')){
-    const buf=await file.arrayBuffer();
-    const res=await mammoth.extractRawText({arrayBuffer:buf});
-    document.getElementById('content').value=res.value;
-  }else{document.getElementById('content').value=await file.text();}
+  const lower=file.name.toLowerCase();
+  try{
+    if(lower.endsWith('.docx')){
+      const buf=await file.arrayBuffer();
+      const res=await mammoth.extractRawText({arrayBuffer:buf});
+      document.getElementById('content').value=res.value;
+    }else if(lower.endsWith('.pptx')){
+      const buf=await file.arrayBuffer();
+      const text=await extractPptxText(buf);
+      if(text.trim()){document.getElementById('content').value=text;}
+      else{document.getElementById('fname').textContent='No readable text found in that file - try pasting instead.';}
+    }else if(lower.endsWith('.ppt')){
+      document.getElementById('content').value='';
+      document.getElementById('fname').textContent='Older .ppt files cannot be read here. In PowerPoint choose Save As and pick .pptx, then upload again (or paste below).';
+    }else{
+      document.getElementById('content').value=await file.text();
+    }
+  }catch(err){
+    document.getElementById('fname').textContent='Could not read that file - please paste the content instead.';
+  }
 }
+
+const NL=String.fromCharCode(10);
+function decodeXml(s){return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,String.fromCharCode(34)).replace(/&apos;/g,String.fromCharCode(39)).replace(/&#x([0-9a-fA-F]+);/g,(_,h)=>String.fromCharCode(parseInt(h,16))).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(parseInt(n,10))).replace(/&amp;/g,'&');}
+function xmlToText(xml){const paras=xml.split(/<a:p[\s>]/).slice(1);const lines=paras.map(p=>{const runs=[];let m;const re=/<a:t[^>]*>([\s\S]*?)<\/a:t>/g;while((m=re.exec(p))!==null)runs.push(decodeXml(m[1]));return runs.join('');}).filter(t=>t.trim().length);return lines.join(NL);}
+function slideNum(name){const a=name.lastIndexOf('slide')+5;const b=name.lastIndexOf('.xml');return parseInt(name.slice(a,b),10);}
+async function notesFor(zip,num){const rels=zip.file('ppt/slides/_rels/slide'+num+'.xml.rels');if(!rels)return '';const relXml=await rels.async('string');const idx=relXml.indexOf('notesSlides/');if(idx<0)return '';const sub=relXml.slice(idx+12);const end=sub.indexOf('.xml');if(end<0)return '';const nf=zip.file('ppt/notesSlides/'+sub.slice(0,end)+'.xml');if(!nf)return '';return xmlToText(await nf.async('string'));}
+async function extractPptxText(buffer){const zip=await JSZip.loadAsync(buffer);const slideNames=Object.keys(zip.files).filter(n=>n.indexOf('ppt/slides/slide')===0&&n.endsWith('.xml')).sort((a,b)=>slideNum(a)-slideNum(b));const blocks=[];for(let i=0;i<slideNames.length;i++){const xml=await zip.file(slideNames[i]).async('string');const body=xmlToText(xml);let block='Slide '+(i+1)+(body?NL+body:'');const notes=await notesFor(zip,slideNum(slideNames[i]));if(notes)block+=NL+'Notes: '+notes;blocks.push(block);}return blocks.join(NL+NL);}
 
 function setStatus(msg,isErr){
   const s=document.getElementById('status');
